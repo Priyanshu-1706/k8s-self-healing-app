@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build image and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t k8s-self-healing-app:ci .
+
+      - name: Start container
+        run: |
+          docker run --rm -d --name app-under-test -p 5000:5000 k8s-self-healing-app:ci
+          for i in $(seq 1 15); do
+            curl -sf http://localhost:5000/health >/dev/null && break
+            sleep 1
+          done
+
+      - name: Test GET / returns 200
+        run: test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/)" = "200"
+
+      - name: Test GET /health returns 200 and healthy JSON
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/health)
+          body=$(curl -s http://localhost:5000/health)
+          test "$code" = "200"
+          echo "$body" | grep -q '"status":"healthy"'
+
+      - name: Test /toggle-health flips /health to 503 and back
+        run: |
+          curl -s http://localhost:5000/toggle-health | grep -q '"status":"unhealthy"'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/health)" = "503"
+          curl -s http://localhost:5000/toggle-health | grep -q '"status":"healthy"'
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:5000/health)" = "200"
+
+      - name: Test container runs as non-root
+        run: test "$(docker exec app-under-test id -u)" = "1000"
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f app-under-test || true
+
+  validate-manifests:
+    name: Validate Kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform
+          ./kubeconform -v
+
+      - name: Validate k8s/*.yaml against Kubernetes schema
+        run: ./kubeconform -strict -summary -ignore-missing-schemas k8s/
