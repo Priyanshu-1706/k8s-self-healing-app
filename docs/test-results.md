@@ -1,29 +1,25 @@
-# Test Results — Self-Healing Demonstrations
+# Test results
 
-All results below were **actually executed and captured** on a local kind
-cluster (Kubernetes v1.37.0, kind v0.33.0, single control-plane node) on
-2026-10-29. Nothing here is fabricated or simulated.
+I ran all of these on my machine on 29 Oct 2026: kind v0.33.0, Kubernetes
+v1.37.0, single control-plane node, macOS (arm64). The output below is pasted
+from the terminal, trimmed where it repeated.
 
-## Summary table
+## Summary
 
-| # | Scenario | Result | Evidence |
-|---|----------|--------|----------|
-| 1 | Delete a Pod → Deployment creates replacement | ✅ VERIFIED | New pod created ~instantly, Ready after readiness probe |
-| 2 | Kill app process (PID 1) → container restart | ✅ VERIFIED | Same pod, `RESTARTS 0→1`, exit 0, back Ready in ~15s |
-| 3 | Break `/health` → probes detect & self-heal | ✅ VERIFIED | Readiness removal at t+30s, liveness kill+restart at t+50s, Ready at t+60s |
-| 4 | Scale 3 → 5 → 3 | ✅ VERIFIED | 5/5 Ready on scale-up, clean return to 3 |
-| 5 | Rolling update 1.0.0 → 1.1.0 | ✅ VERIFIED | **35/35 requests OK, 0 failures during rollout** |
-| 6 | Faulty rollout → stuck, old pods serve → undo | ✅ VERIFIED | ImagePullBackOff; **25/25 requests OK while stuck**; undo restored 1.1.0 |
+| # | Test | Worked? | Result |
+|---|------|---------|--------|
+| 1 | Delete a pod | yes | Replacement pod created immediately, Ready after the readiness probe delay |
+| 2 | Kill PID 1 in a container | yes | Same pod, RESTARTS 0 to 1, clean exit, Ready again in ~15s |
+| 3 | Break /health with /toggle-health | yes | Readiness dropped the pod at ~30s, liveness restarted the container at ~50s, recovered on its own |
+| 4 | Scale 3 to 5 to 3 | yes | 5/5 Ready on scale up, back to 3 cleanly |
+| 5 | Rolling update 1.0.0 to 1.1.0 | yes | 35/35 requests OK during the rollout, 0 failures |
+| 6 | Bad image tag, then undo | yes | New pod stuck in ImagePullBackOff, old pods kept serving (25/25 OK), undo worked |
 
-### Not performed (honest scope)
+Things I did not test: OOMKill under memory pressure (limits are set but I
+never pushed the app that hard), node failure (single-node cluster), and
+network/DNS failures. Not pretending those happened.
 
-- OOMKill under memory-limit pressure (limits are set but not stress-tested)
-- Node failure / cluster autoscaling (single-node kind cluster)
-- Network partitions, DNS failures
-
----
-
-## Scenario 1 — Pod deletion (Pod replacement)
+## Scenario 1: pod deletion
 
 ```
 === BEFORE ===
@@ -36,17 +32,18 @@ $ kubectl delete pod k8s-self-healing-app-6dbbb77f79-7hpkg
 === AFTER (5s) ===
 k8s-self-healing-app-6dbbb77f79-cmw9h   1/1   Running   0
 k8s-self-healing-app-6dbbb77f79-mj7mp   1/1   Running   0
-k8s-self-healing-app-6dbbb77f79-rnm98   0/1   Running   0    <- NEW pod
+k8s-self-healing-app-6dbbb77f79-rnm98   0/1   Running   0    <- new pod
 ```
 
-The ReplicaSet `DESIRED 3 / CURRENT 3 / READY 2` shows the controller
-immediately reconciling toward the desired state. The new pod shows `0/1`
-for a few seconds because the readiness probe has `initialDelaySeconds: 5`.
+The ReplicaSet showed DESIRED 3 / CURRENT 3 / READY 2 right after the delete,
+so the controller was already creating the replacement. The new pod sat at
+0/1 for a few seconds because of `initialDelaySeconds: 5` on the readiness
+probe.
 
-**Diagnosis commands:** `kubectl get pods`, `kubectl get rs`,
-`kubectl describe pod <name>`, `kubectl get events --sort-by=.lastTimestamp`
+Useful commands when this happens to you: `kubectl get pods`, `kubectl get rs`,
+`kubectl describe pod <name>`, `kubectl get events --sort-by=.lastTimestamp`.
 
-## Scenario 2 — Process crash (container restart, same Pod)
+## Scenario 2: process crash
 
 ```
 $ kubectl exec k8s-self-healing-app-6dbbb77f79-cmw9h -- sh -c "kill 1"
@@ -55,21 +52,22 @@ k8s-self-healing-app-6dbbb77f79-cmw9h   0/1   Running   1 (4s ago)
 k8s-self-healing-app-6dbbb77f79-cmw9h   0/1   Running   1 (10s ago)
 k8s-self-healing-app-6dbbb77f79-cmw9h   1/1   Running   1 (15s ago)
 
-restartCount: 1; lastState: Completed (exit code 0)
-Events: Container created -> Container started   (kubelet restarted it)
+restartCount: 1, lastState: Completed (exit code 0)
+Events: Container created -> Container started
 ```
 
-Note: `kill` is a shell builtin, so `sh -c "kill 1"` is required inside the
-slim image. Gunicorn (PID 1) handled SIGTERM gracefully (exit 0).
+Two things I learned here. First, `kill` is a shell builtin so it has to go
+through `sh -c` in the slim image. Second, gunicorn is PID 1 and handles
+SIGTERM gracefully, hence exit code 0.
 
-**Key difference vs Scenario 1:** the Pod NAME stays the same and only
-`RESTARTS` increments — the kubelet restarts the *container*; the Deployment
-controller is not involved.
+The important difference from scenario 1: the pod name does not change. The
+kubelet restarted the container inside the same pod, the Deployment controller
+was not involved at all.
 
-## Scenario 3 — Liveness/readiness failure (controlled break + auto-recovery)
+## Scenario 3: app alive but returning errors
 
-v1.1.0 adds `GET /toggle-health`, which creates a marker file that makes
-`/health` return 503 until the container restarts (a restart wipes `/tmp`).
+v1.1.0 added `/toggle-health`, which drops a marker file in /tmp that makes
+`/health` return 503 until the container restarts.
 
 ```
 $ kubectl exec <pod> -- python3 -c "...urlopen('http://localhost:5000/toggle-health')..."
@@ -77,15 +75,15 @@ $ kubectl exec <pod> -- python3 -c "...urlopen('http://localhost:5000/toggle-hea
 
 $ /health inside the pod -> HTTP 503
 
-Timeline (polled every 10s):
+polled every 10s:
 t+10s: READY 1/1, RESTARTS 0, endpoints 3/3
 t+20s: READY 1/1, RESTARTS 0, endpoints 3/3
-t+30s: READY 0/1, RESTARTS 0, endpoints 2/3   <- readiness failed (3 x 10s), pod pulled from Service
+t+30s: READY 0/1, RESTARTS 0, endpoints 2/3   readiness failed (3 x 10s), pod out of the Service
 t+40s: READY 0/1, RESTARTS 0, endpoints 2/3
-t+50s: READY 0/1, RESTARTS 1, endpoints 2/3   <- liveness failed (3 x 20s), container killed & restarted
-t+60s: READY 1/1, RESTARTS 1, endpoints 3/3   <- healthy again, back in rotation
+t+50s: READY 0/1, RESTARTS 1, endpoints 2/3   liveness failed (3 x 20s), container killed and restarted
+t+60s: READY 1/1, RESTARTS 1, endpoints 3/3   healthy again, back in rotation
 
-Events (kubectl get events):
+events:
 Warning  Unhealthy  Readiness probe failed: HTTP probe failed with statuscode: 503
 Warning  Unhealthy  Liveness probe failed: HTTP probe failed with statuscode: 503
 Normal   Killing    Container flask failed liveness probe, will be restarted
@@ -93,68 +91,72 @@ Normal   Created    Container created
 Normal   Started    Container started
 ```
 
-The app required **zero manual repair**: the restart cleared the marker file
-and `/health` returned 200 automatically.
+I did not touch the pod after breaking it. The restart wiped /tmp, the marker
+file went away, and /health returned 200 on its own.
 
-## Scenario 4 — Scaling
+## Scenario 4: scaling
 
 ```
 $ kubectl scale deployment/k8s-self-healing-app --replicas=5
 -> 5 pods, all 1/1 Running
 
 $ kubectl scale deployment/k8s-self-healing-app --replicas=3
--> 3 pods, all 1/1 Running    (3 desired, 3 ready)
+-> 3 pods, all 1/1 Running
 ```
 
-## Scenario 5 — Rolling update with zero downtime
+Nothing surprising, it just worked.
 
-A separate probe pod requested `/health` through the Service once per second
-for the entire rollout:
+## Scenario 5: rolling update
+
+Before starting the rollout I ran a separate pod that requested /health
+through the Service once per second for the whole update:
 
 ```
 $ kubectl set image deployment/k8s-self-healing-app flask=k8s-self-healing-app:1.1.0
 $ kubectl rollout status deployment/k8s-self-healing-app
 deployment "k8s-self-healing-app" successfully rolled out
 
-Probe result:
+probe result:
 REQUESTS OK: 35 / 35   FAILED: 0
-VERSIONS SEEN: ['healthy1.0.0', 'healthy1.1.0']   <- old & new both served during rollout
-
-ReplicaSets after: new 3/3/3, old 0/0/0 (kept for rollback)
+VERSIONS SEEN: ['healthy1.0.0', 'healthy1.1.0']
 ```
 
-`maxUnavailable: 0` + `maxSurge: 1` meant a new pod became Ready before each
-old pod was terminated.
+Both versions appear in the probe output, which means old and new pods were
+serving at the same time. With maxUnavailable 0 and maxSurge 1, an old pod
+only dies after a new one passes its readiness probe, so nothing dropped.
 
-## Scenario 6 — Faulty rollout, stuck safely, then undo
+The old ReplicaSet gets scaled to 0 but kept around. That is what makes
+`rollout undo` possible.
+
+## Scenario 6: bad deploy and rollback
 
 ```
 $ kubectl set image deployment/k8s-self-healing-app flask=k8s-self-healing-app:2.0.0
-   (tag does not exist on the node; imagePullPolicy: IfNotPresent)
+   (tag does not exist on the node, imagePullPolicy is IfNotPresent)
 
-new pod:   0/1  ErrImagePull -> ImagePullBackOff ("Back-off pulling image k8s-self-healing-app:2.0.0")
-old pods:  3x  1/1  Running   <- never terminated, still serving
+new pod:   0/1  ErrImagePull -> ImagePullBackOff
+old pods:  3x  1/1  Running   (never terminated, still serving)
 
-Probe result DURING the stuck rollout:
-OK: 25 / 25   FAILED: 0      <- zero downtime even during a broken deploy
+probe result while the rollout was stuck:
+OK: 25 / 25   FAILED: 0
 
 $ kubectl rollout undo deployment/k8s-self-healing-app
 deployment.apps/k8s-self-healing-app rolled back
--> 3 pods 1/1 Running, service serving version 1.1.0
+-> 3 pods 1/1 Running, service back on 1.1.0
 ```
 
----
+This is the test I liked most. A completely broken deploy still caused zero
+downtime, because the rollout never got far enough to kill the old pods.
 
-## Concept summary — what heals what
+## What heals what
 
-| Failure | Healed by | Granularity |
+| Failure | Who fixes it | What you see |
 |---|---|---|
-| Process crashes/exits | kubelet restarts the **container** (liveness/restartPolicy) | Same Pod, RESTARTS++ |
-| Pod deleted / node lost | Deployment controller creates a **new Pod** | New Pod name |
-| App returns errors but process alive | **Liveness probe** kills container -> restart | Same Pod, RESTARTS++ |
-| App temporarily not ready (startup, dep down) | **Readiness probe** removes Pod from Service (no restart) | Endpoints only |
+| Process crashes or exits | kubelet restarts the container | Same pod, RESTARTS goes up |
+| Pod deleted or node dies | Deployment controller makes a new pod | New pod name |
+| App returns errors but process is alive | Liveness probe kills the container, restart follows | Same pod, RESTARTS goes up |
+| App temporarily not ready (slow start, dependency down) | Readiness probe drops the pod from the Service | Pod stays up, just gets no traffic |
 
-Kubernetes restarts *processes and pods* — it does **not** fix application
-bugs, and it cannot recover from a failure where every replica is permanently
-unhealthy (e.g. a bad image on the very first deploy, or a crash-on-boot bug,
-which causes CrashLoopBackOff forever).
+Worth saying plainly: Kubernetes restarts processes and pods. It does not fix
+bugs. If every replica crashes on boot, you get CrashLoopBackOff forever until
+a human shows up.
