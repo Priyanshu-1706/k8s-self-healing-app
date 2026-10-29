@@ -21,14 +21,14 @@ spec:
     spec:
       containers:
         - name: flask
-          image: k8s-self-healing-app:1.1.0
+          image: k8s-self-healing-app:1.2.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 5000
               name: http
           env:
             - name: APP_VERSION
-              value: "1.1.0"
+              value: "1.2.0"
           resources:
             requests:
               cpu: 100m

@@ -45,9 +45,10 @@ probe.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /` | HTML status page — shows version + pod hostname (reload to see load balancing) |
+| `GET /` | Live dashboard (dark mission-control UI) — polls `/stats` every 2s: status, version, pod hostname, uptime, request count. Ticks in real time |
 | `GET /health` | `200 {"status":"healthy"}` when healthy — the probe target. `503` if unhealthy |
-| `GET /toggle-health` | Demo-only: flips `/health` between 200 and 503 (marker file; a container restart clears it) |
+| `GET /stats` | JSON: status, version, hostname, uptime, requests served, PID |
+| `GET /toggle-health` | Demo-only: flips `/health` between 200 and 503 (marker file; a container restart clears it). The dashboard turns red while unhealthy |
 
 ## Prerequisites
 
@@ -60,13 +61,13 @@ probe.
 
 ```bash
 # 1. Build
-docker build -t k8s-self-healing-app:1.1.0 .
+docker build -t k8s-self-healing-app:1.2.0 .
 
 # 2. Create a local cluster
 kind create cluster --name k8s-self-healing
 
 # 3. Load the image (kind cannot see your local Docker images otherwise)
-kind load docker-image k8s-self-healing-app:1.1.0 --name k8s-self-healing
+kind load docker-image k8s-self-healing-app:1.2.0 --name k8s-self-healing
 
 # 4. Deploy
 kubectl apply -f k8s/
@@ -106,7 +107,7 @@ Full commands, captured output, and timelines: **[docs/test-results.md](docs/tes
 ```bash
 kubectl delete -f k8s/                     # remove app + service
 kind delete cluster --name k8s-self-healing # remove entire cluster
-docker rmi k8s-self-healing-app:1.0.0 k8s-self-healing-app:1.1.0
+docker rmi k8s-self-healing-app:1.0.0 k8s-self-healing-app:1.1.0 k8s-self-healing-app:1.2.0
 ```
 
 ## Repository layout
